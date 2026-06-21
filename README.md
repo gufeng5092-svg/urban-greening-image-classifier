@@ -155,8 +155,3 @@ Keep `final_app/class_names.json` in the same class order used during training. 
 
 See [final_app/README.md](final_app/README.md) for the inference app details.
 
-## Notes for GitHub Publishing
-
-- Do not commit raw data, cleaned data, augmented data, cache folders, or large CV output directories.
-- The trained checkpoints under `final_app/checkpoints/` are kept so the repository can run as a ready-to-use classifier.
-- The Chinese class names are kept because they are the model labels and define checkpoint output order.
