@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Urban Greening Image Classification</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <div class="uploader" id="dropZone">
+          <input id="fileInput" type="file" accept="image/*">
+          <div class="upload-copy">
+            <div class="upload-title">Urban Greening Image Classification</div>
+            <div class="upload-subtitle">Select or drop one maintenance image</div>
+          </div>
+          <button class="primary-button" type="button" id="selectButton">Select Image</button>
+        </div>
+
+        <div class="preview-panel">
+          <img id="previewImage" alt="">
+          <div class="empty-preview" id="emptyPreview">Waiting for an image</div>
+        </div>
+      </section>
+
+      <aside class="result-panel">
+        <div class="status" id="status">Not started</div>
+        <div class="prediction">
+          <div class="prediction-label" id="predictionLabel">--</div>
+          <div class="prediction-confidence" id="predictionConfidence">--</div>
+        </div>
+        <div class="prob-list" id="probList"></div>
+        <div class="meta-grid">
+          <div>
+            <span>Model</span>
+            <strong>Weighted three-model ensemble</strong>
+          </div>
+          <div>
+            <span>Weights</span>
+            <strong>0.25 / 0.35 / 0.40</strong>
+          </div>
+          <div>
+            <span>Device</span>
+            <strong id="deviceText">--</strong>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <script>
+      const fileInput = document.getElementById('fileInput');
+      const selectButton = document.getElementById('selectButton');
+      const dropZone = document.getElementById('dropZone');
+      const statusText = document.getElementById('status');
+      const previewImage = document.getElementById('previewImage');
+      const emptyPreview = document.getElementById('emptyPreview');
+      const predictionLabel = document.getElementById('predictionLabel');
+      const predictionConfidence = document.getElementById('predictionConfidence');
+      const probList = document.getElementById('probList');
+      const deviceText = document.getElementById('deviceText');
+
+      selectButton.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', () => {
+        if (fileInput.files.length) submitImage(fileInput.files[0]);
+      });
+
+      ['dragenter', 'dragover'].forEach(name => {
+        dropZone.addEventListener(name, event => {
+          event.preventDefault();
+          dropZone.classList.add('is-dragging');
+        });
+      });
+      ['dragleave', 'drop'].forEach(name => {
+        dropZone.addEventListener(name, event => {
+          event.preventDefault();
+          dropZone.classList.remove('is-dragging');
+        });
+      });
+      dropZone.addEventListener('drop', event => {
+        const file = event.dataTransfer.files[0];
+        if (file) submitImage(file);
+      });
+
+      async function submitImage(file) {
+        const form = new FormData();
+        form.append('image', file);
+        statusText.textContent = 'Classifying...';
+        predictionLabel.textContent = '--';
+        predictionConfidence.textContent = '--';
+        probList.innerHTML = '';
+        previewImage.src = URL.createObjectURL(file);
+        previewImage.style.display = 'block';
+        emptyPreview.style.display = 'none';
+        try {
+          const response = await fetch('/predict', { method: 'POST', body: form });
+          const contentType = response.headers.get('content-type') || '';
+          const data = contentType.includes('application/json')
+            ? await response.json()
+            : { error: await response.text() };
+          if (!response.ok) throw new Error(data.error || 'Classification failed');
+          renderResult(data);
+        } catch (error) {
+          statusText.textContent = error.message.includes('<!doctype')
+            ? 'The backend returned an HTML error page. Check whether the service is running correctly.'
+            : error.message;
+        }
+      }
+
+      function renderResult(data) {
+        statusText.textContent = 'Classification complete';
+        previewImage.src = data.preview;
+        previewImage.style.display = 'block';
+        emptyPreview.style.display = 'none';
+        predictionLabel.textContent = data.label;
+        predictionConfidence.textContent = `${(data.confidence * 100).toFixed(2)}%`;
+        deviceText.textContent = data.device;
+
+        probList.innerHTML = '';
+        data.probabilities.forEach(item => {
+          const row = document.createElement('div');
+          row.className = 'prob-row';
+          const percent = item.probability * 100;
+          row.innerHTML = `
+            <div class="prob-head">
+              <span>${item.label}</span>
+              <strong>${percent.toFixed(2)}%</strong>
+            </div>
+            <div class="bar"><span style="width: ${percent}%"></span></div>
+          `;
+          probList.appendChild(row);
+        });
+      }
+    </script>
+  </body>
+</html>

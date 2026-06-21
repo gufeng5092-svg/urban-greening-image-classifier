@@ -1,0 +1,44 @@
+# OS/editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Local caches
+.cache/
+.matplotlib_cache/
+
+# Datasets and generated review images
+data/raw/
+data/cleaned/
+data/augmented/
+城市管理绿化管护图像分类赛题数据/
+cleaned_dataset/
+augmented_dataset/
+manual_review_images/
+
+# Generated reports and training outputs
+cleaning_report/
+augmentation_report/
+cv_results/
+cv_smoke_test*/
+
+# Model artifacts
+*.pth
+!final_app/checkpoints/**/*.pth
+*.pt
+*.onnx
+
+# Flask/runtime uploads
+uploads/
