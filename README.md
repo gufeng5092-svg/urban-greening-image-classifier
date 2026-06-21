@@ -48,7 +48,7 @@ http://127.0.0.1:7860
 
 ## Data Policy
 
-The original competition dataset is not included in this repository. Put local training images under `data/raw/` when reproducing or extending the pipeline. Generated datasets and training outputs are ignored by Git because they are large and may contain competition data.
+The original competition dataset is not included in this repository. Put local training images under `data/raw/` when reproducing or extending the pipeline. 
 
 Expected raw-data format:
 
