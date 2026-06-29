@@ -2,24 +2,33 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 import torch
 import torch.nn.functional as F
 from PIL import Image
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
-from torchvision import transforms
 
-from train_cross_validation import choose_device, create_model
+from urban_greening_classifier.device import choose_device
+from urban_greening_classifier.io import read_json
+from urban_greening_classifier.io import write_csv as shared_write_csv
+from urban_greening_classifier.logging_utils import configure_logging, get_logger
+from urban_greening_classifier.models import SUPPORTED_MODELS, create_model
+from urban_greening_classifier.transforms import build_eval_transform
+
+LOGGER = get_logger(__name__)
 
 
 def read_class_names(path: Path) -> list[str]:
-    import json
-
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Read class names in training output order."""
+    return list(read_json(path))
 
 
 def read_val_splits(path: Path) -> dict[int, list[dict]]:
+    """Read validation split rows grouped by fold."""
     folds: dict[int, list[dict]] = {}
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
@@ -29,24 +38,15 @@ def read_val_splits(path: Path) -> dict[int, list[dict]]:
     return folds
 
 
-def build_transform(image_size: int) -> transforms.Compose:
-    return transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-        ]
-    )
-
-
 @torch.no_grad()
 def predict_fold(
     model: torch.nn.Module,
     rows: list[dict],
     class_to_id: dict[str, int],
-    transform: transforms.Compose,
+    transform: torch.nn.Module,
     device: torch.device,
 ) -> list[dict]:
+    """Run a fold checkpoint over its validation split and return probabilities."""
     model.eval()
     predictions: list[dict] = []
     for row in rows:
@@ -70,15 +70,12 @@ def predict_fold(
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        return
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
+    """Backward-compatible wrapper around the shared CSV writer."""
+    shared_write_csv(path, rows)
 
 
 def write_metrics(path: Path, rows: list[dict]) -> None:
+    """Write aggregate metrics for exported predictions."""
     y_true = [int(r["true_id"]) for r in rows]
     y_pred = [int(r["pred_id"]) for r in rows]
     metrics = [
@@ -92,9 +89,10 @@ def write_metrics(path: Path, rows: list[dict]) -> None:
 
 
 def main() -> None:
+    configure_logging()
     parser = argparse.ArgumentParser(description="Export fold validation probabilities from saved CV models.")
     parser.add_argument("--result-dir", type=Path, required=True)
-    parser.add_argument("--model", choices=["small_cnn", "resnet18", "mobilenet_v3_small", "efficientnet_b0"], required=True)
+    parser.add_argument("--model", choices=SUPPORTED_MODELS, required=True)
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
@@ -103,7 +101,7 @@ def main() -> None:
     class_names = read_class_names(args.result_dir / "class_names.json")
     class_to_id = {name: idx for idx, name in enumerate(class_names)}
     folds = read_val_splits(args.result_dir / "fold_splits.csv")
-    transform = build_transform(args.image_size)
+    transform = build_eval_transform(args.image_size)
 
     all_predictions: list[dict] = []
     for fold, rows in sorted(folds.items()):
@@ -113,11 +111,11 @@ def main() -> None:
         fold_predictions = predict_fold(model, rows, class_to_id, transform, device)
         write_csv(args.result_dir / f"fold_{fold}" / "predictions.csv", fold_predictions)
         all_predictions.extend(fold_predictions)
-        print(f"fold {fold}: {len(fold_predictions)} predictions")
+        LOGGER.info("fold %s: %s predictions", fold, len(fold_predictions))
 
     write_csv(args.result_dir / "overall_predictions.csv", all_predictions)
     write_metrics(args.result_dir / "prediction_metrics.csv", all_predictions)
-    print(f"saved: {args.result_dir / 'overall_predictions.csv'}")
+    LOGGER.info("saved: %s", args.result_dir / "overall_predictions.csv")
 
 
 if __name__ == "__main__":

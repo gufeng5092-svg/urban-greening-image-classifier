@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import random
 import shutil
+import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
+from urban_greening_classifier.config import load_yaml_config
+from urban_greening_classifier.constants import IMAGE_EXTENSIONS
+from urban_greening_classifier.io import write_csv as shared_write_csv
+from urban_greening_classifier.logging_utils import configure_logging, get_logger
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-DEFAULT_SOURCE = Path("data/cleaned")
-DEFAULT_OUTPUT = Path("data/augmented")
-DEFAULT_REPORT = Path("augmentation_report")
+LOGGER = get_logger(__name__)
 
 
 @dataclass
@@ -29,6 +32,7 @@ class AugmentRecord:
 
 
 def list_images(source: Path) -> dict[str, list[Path]]:
+    """List image files grouped by class directory."""
     grouped: dict[str, list[Path]] = defaultdict(list)
     for class_dir in sorted([p for p in source.iterdir() if p.is_dir()]):
         files = [p for p in class_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
@@ -37,6 +41,7 @@ def list_images(source: Path) -> dict[str, list[Path]]:
 
 
 def random_resized_crop(img: Image.Image, rng: random.Random) -> Image.Image:
+    """Apply a conservative resized crop while preserving the original canvas size."""
     width, height = img.size
     scale = rng.uniform(0.86, 1.0)
     crop_w = max(1, int(width * scale))
@@ -48,6 +53,7 @@ def random_resized_crop(img: Image.Image, rng: random.Random) -> Image.Image:
 
 
 def translate(img: Image.Image, rng: random.Random) -> Image.Image:
+    """Translate an image with mean-color padding."""
     width, height = img.size
     dx = int(width * rng.uniform(-0.08, 0.08))
     dy = int(height * rng.uniform(-0.08, 0.08))
@@ -56,11 +62,16 @@ def translate(img: Image.Image, rng: random.Random) -> Image.Image:
         Image.Transform.AFFINE,
         (1, 0, -dx, 0, 1, -dy),
         resample=Image.Resampling.BICUBIC,
-        fillcolor=(int(np.asarray(img)[:, :, 0].mean()), int(np.asarray(img)[:, :, 1].mean()), int(np.asarray(img)[:, :, 2].mean())),
+        fillcolor=(
+            int(np.asarray(img)[:, :, 0].mean()),
+            int(np.asarray(img)[:, :, 1].mean()),
+            int(np.asarray(img)[:, :, 2].mean()),
+        ),
     )
 
 
 def color_jitter(img: Image.Image, rng: random.Random) -> Image.Image:
+    """Apply brightness, contrast and saturation jitter."""
     out = img
     out = ImageEnhance.Brightness(out).enhance(rng.uniform(0.82, 1.18))
     out = ImageEnhance.Contrast(out).enhance(rng.uniform(0.82, 1.20))
@@ -69,6 +80,7 @@ def color_jitter(img: Image.Image, rng: random.Random) -> Image.Image:
 
 
 def add_noise(img: Image.Image, rng: random.Random) -> Image.Image:
+    """Add low-amplitude Gaussian noise."""
     arr = np.asarray(img).astype(np.float32)
     sigma = rng.uniform(3.0, 9.0)
     noise = np.random.default_rng(rng.randint(0, 2**31 - 1)).normal(0, sigma, arr.shape)
@@ -77,6 +89,7 @@ def add_noise(img: Image.Image, rng: random.Random) -> Image.Image:
 
 
 def cutout(img: Image.Image, rng: random.Random) -> Image.Image:
+    """Apply one mean-color cutout patch."""
     out = img.copy()
     width, height = out.size
     box_w = int(width * rng.uniform(0.08, 0.16))
@@ -91,6 +104,7 @@ def cutout(img: Image.Image, rng: random.Random) -> Image.Image:
 
 
 def augment_image(img: Image.Image, rng: random.Random) -> tuple[Image.Image, str]:
+    """Create one augmented image and return the operation trace."""
     out = img.convert("RGB")
     operations: list[str] = []
 
@@ -100,7 +114,11 @@ def augment_image(img: Image.Image, rng: random.Random) -> tuple[Image.Image, st
 
     if rng.random() < 0.75:
         angle = rng.uniform(-12, 12)
-        out = out.rotate(angle, resample=Image.Resampling.BICUBIC, fillcolor=tuple(int(x) for x in np.asarray(out).reshape(-1, 3).mean(axis=0)))
+        out = out.rotate(
+            angle,
+            resample=Image.Resampling.BICUBIC,
+            fillcolor=tuple(int(x) for x in np.asarray(out).reshape(-1, 3).mean(axis=0)),
+        )
         operations.append(f"rotate_{angle:.1f}")
 
     if rng.random() < 0.60:
@@ -139,15 +157,12 @@ def augment_image(img: Image.Image, rng: random.Random) -> tuple[Image.Image, st
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = list(rows[0].keys()) if rows else []
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    """Backward-compatible wrapper around the shared CSV writer."""
+    shared_write_csv(path, rows)
 
 
 def load_font(size: int) -> ImageFont.ImageFont:
+    """Load a CJK-capable font when available and fall back to the PIL default."""
     candidates = [
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
@@ -163,6 +178,7 @@ def load_font(size: int) -> ImageFont.ImageFont:
 
 
 def compact_caption(name: str, max_chars: int = 20) -> str:
+    """Create a short thumbnail caption."""
     stem = Path(name).stem
     if "_aug_" in stem:
         base, aug_id = stem.rsplit("_aug_", 1)
@@ -172,6 +188,7 @@ def compact_caption(name: str, max_chars: int = 20) -> str:
 
 
 def create_contact_sheet(image_paths: list[Path], output_path: Path, title: str) -> None:
+    """Create an augmentation preview contact sheet."""
     if not image_paths:
         return
     columns = 5
@@ -199,12 +216,18 @@ def create_contact_sheet(image_paths: list[Path], output_path: Path, title: str)
 
 
 def write_report(report_dir: Path, before: Counter, after: Counter, records: list[AugmentRecord]) -> None:
+    """Write the markdown augmentation report."""
     lines = [
         "# Data Augmentation Report",
         "",
         "## 1. Purpose",
         "",
-        "The cleaned urban greening maintenance image dataset is class-imbalanced. Bare-soil classes have fewer samples than the exposed-trash class. Offline augmentation is applied to minority classes to reduce majority-class bias and improve robustness to lighting, viewpoint, scale variation, and partial occlusion in street-scene images.",
+        (
+            "The cleaned urban greening maintenance image dataset is class-imbalanced. Bare-soil classes have "
+            "fewer samples than the exposed-trash class. Offline augmentation is applied to minority classes to "
+            "reduce majority-class bias and improve robustness to lighting, viewpoint, scale variation, and "
+            "partial occlusion in street-scene images."
+        ),
         "",
         "## 2. Strategy",
         "",
@@ -246,12 +269,16 @@ def write_report(report_dir: Path, before: Counter, after: Counter, records: lis
 
 
 def main() -> None:
+    configure_logging()
+    defaults = load_yaml_config("configs/data.yaml")["augmentation"]
     parser = argparse.ArgumentParser(description="Augment cleaned urban greening classification dataset.")
-    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
-    parser.add_argument("--seed", type=int, default=20260617)
-    parser.add_argument("--target", type=int, default=None, help="Target count per class. Defaults to max class count.")
+    parser.add_argument("--source", type=Path, default=Path(defaults["source"]))
+    parser.add_argument("--output", type=Path, default=Path(defaults["output"]))
+    parser.add_argument("--report", type=Path, default=Path(defaults["report"]))
+    parser.add_argument("--seed", type=int, default=defaults["seed"])
+    parser.add_argument(
+        "--target", type=int, default=defaults["target"], help="Target count per class. Defaults to max class count."
+    )
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
@@ -303,7 +330,9 @@ def main() -> None:
     after = Counter()
     for label_dir in args.output.iterdir():
         if label_dir.is_dir():
-            after[label_dir.name] = len([p for p in label_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS])
+            after[label_dir.name] = len(
+                [p for p in label_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+            )
 
     write_csv(args.report / "augmentation_records.csv", [asdict(r) for r in records])
     write_csv(
@@ -324,12 +353,12 @@ def main() -> None:
 
     write_report(args.report, before, after, records)
 
-    print(f"source: {args.source}")
-    print(f"target_per_class: {target}")
-    print(f"generated: {len(records)}")
-    print(f"output: {args.output}")
+    LOGGER.info("source: %s", args.source)
+    LOGGER.info("target_per_class: %s", target)
+    LOGGER.info("generated: %s", len(records))
+    LOGGER.info("output: %s", args.output)
     for label in sorted(after):
-        print(f"{label}: {before[label]} -> {after[label]}")
+        LOGGER.info("%s: %s -> %s", label, before[label], after[label])
 
 
 if __name__ == "__main__":

@@ -1,114 +1,33 @@
 from __future__ import annotations
 
-import json
+import sys
 from pathlib import Path
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from PIL import Image
-from torchvision import models, transforms
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from urban_greening_classifier.config import load_yaml_config
+from urban_greening_classifier.inference import EnsembleClassifier
+from urban_greening_classifier.io import read_json
+from urban_greening_classifier.models import create_model  # noqa: F401
+from urban_greening_classifier.paths import resolve_project_path
+from urban_greening_classifier.transforms import build_eval_transform as build_transform  # noqa: F401
+
+_CONFIG = load_yaml_config("configs/inference.yaml")["inference"]
+CHECKPOINT_DIR = resolve_project_path(_CONFIG["checkpoint_dir"])
+CLASS_NAMES = list(read_json(resolve_project_path(_CONFIG["class_names_path"])))
+MODEL_WEIGHTS = dict(_CONFIG["model_weights"])
 
 
-APP_DIR = Path(__file__).resolve().parent
-CHECKPOINT_DIR = APP_DIR / "checkpoints"
-CLASS_NAMES = json.loads((APP_DIR / "class_names.json").read_text(encoding="utf-8"))
-MODEL_WEIGHTS = {
-    "efficientnet_b0": 0.25,
-    "mobilenet_v3_small": 0.35,
-    "resnet18": 0.40,
-}
-
-
-def choose_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
-def create_model(model_name: str, num_classes: int) -> nn.Module:
-    if model_name == "efficientnet_b0":
-        model = models.efficientnet_b0(weights=None)
-        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
-        return model
-    if model_name == "mobilenet_v3_small":
-        model = models.mobilenet_v3_small(weights=None)
-        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
-        return model
-    if model_name == "resnet18":
-        model = models.resnet18(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
-        return model
-    raise ValueError(f"Unsupported model: {model_name}")
-
-
-def build_transform(image_size: int = 224) -> transforms.Compose:
-    return transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-        ]
+def build_classifier() -> EnsembleClassifier:
+    """Build the trained ensemble classifier from repository configuration."""
+    return EnsembleClassifier(
+        checkpoint_dir=CHECKPOINT_DIR,
+        class_names_path=resolve_project_path(_CONFIG["class_names_path"]),
+        model_weights=MODEL_WEIGHTS,
+        image_size=int(_CONFIG["image_size"]),
+        device=str(_CONFIG["device"]),
     )
 
 
-class EnsembleClassifier:
-    def __init__(self) -> None:
-        self.device = choose_device()
-        self.transform = build_transform()
-        self.models: dict[str, list[nn.Module]] = {}
-        self.loaded = False
-
-    def load(self) -> None:
-        if self.loaded:
-            return
-        for model_name in MODEL_WEIGHTS:
-            model_dir = CHECKPOINT_DIR / model_name
-            checkpoint_paths = sorted(model_dir.glob("fold_*.pth"))
-            if not checkpoint_paths:
-                raise FileNotFoundError(f"No checkpoints found for {model_name}: {model_dir}")
-            self.models[model_name] = []
-            for checkpoint_path in checkpoint_paths:
-                model = create_model(model_name, len(CLASS_NAMES))
-                state = torch.load(checkpoint_path, map_location=self.device)
-                model.load_state_dict(state)
-                model.to(self.device)
-                model.eval()
-                self.models[model_name].append(model)
-        self.loaded = True
-
-    @torch.no_grad()
-    def predict(self, image: Image.Image) -> dict:
-        self.load()
-        tensor = self.transform(image.convert("RGB")).unsqueeze(0).to(self.device)
-        final_probs = torch.zeros(len(CLASS_NAMES), device=self.device)
-        model_details = {}
-
-        for model_name, weight in MODEL_WEIGHTS.items():
-            fold_probs = []
-            for model in self.models[model_name]:
-                logits = model(tensor)
-                fold_probs.append(F.softmax(logits, dim=1).squeeze(0))
-            model_probs = torch.stack(fold_probs, dim=0).mean(dim=0)
-            final_probs += weight * model_probs
-            model_details[model_name] = [float(x) for x in model_probs.detach().cpu()]
-
-        probs = final_probs.detach().cpu()
-        pred_id = int(torch.argmax(probs).item())
-        return {
-            "label": CLASS_NAMES[pred_id],
-            "class_id": pred_id,
-            "confidence": float(probs[pred_id].item()),
-            "probabilities": [
-                {"label": label, "probability": float(probs[idx].item())}
-                for idx, label in enumerate(CLASS_NAMES)
-            ],
-            "model_weights": MODEL_WEIGHTS,
-            "model_details": model_details,
-            "device": str(self.device),
-        }
-
-
-classifier = EnsembleClassifier()
+classifier = build_classifier()

@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
+import sys
 from pathlib import Path
+
+APP_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = APP_DIR.parent
+sys.path.insert(0, str(APP_DIR))
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+os.environ.setdefault("MPLCONFIGDIR", str(PROJECT_ROOT / ".matplotlib_cache"))
+os.environ.setdefault("XDG_CACHE_HOME", str(PROJECT_ROOT / ".cache"))
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+from inference import CLASS_NAMES, build_transform, create_model
 from matplotlib import font_manager
 from PIL import Image
 
-from inference import CLASS_NAMES, create_model, build_transform
-
-
-APP_DIR = Path(__file__).resolve().parent
 CHECKPOINT_DIR = APP_DIR / "checkpoints"
 DEFAULT_IMAGE = APP_DIR / "examples" / "存在明显暴露垃圾_790.png"
 DEFAULT_OUTPUT = APP_DIR / "model_stage_comparison.png"
@@ -24,6 +31,7 @@ DISPLAY_NAMES = {
     "resnet18": "ResNet18",
 }
 SHORT_CLASS_NAMES = ["Small bare soil", "Large bare soil", "Exposed trash"]
+LOGGER = logging.getLogger(__name__)
 
 
 def setup_plot_font() -> None:
@@ -172,7 +180,11 @@ def main() -> None:
         ax_text.text(
             0.02,
             0.96,
-            f"Predicted class: {SHORT_CLASS_NAMES[pred_id]}\n\nConfidence: {confidence * 100:.2f}%\n\nClass probabilities:\n{probability_text(probs)}",
+            (
+                f"Predicted class: {SHORT_CLASS_NAMES[pred_id]}\n\n"
+                f"Confidence: {confidence * 100:.2f}%\n\n"
+                f"Class probabilities:\n{probability_text(probs)}"
+            ),
             va="top",
             ha="left",
             fontsize=11.5,
@@ -189,7 +201,10 @@ def main() -> None:
     fig.text(
         0.5,
         0.025,
-        "Note: redder heatmap areas indicate stronger model attention for the current classification. Each model visualization uses fold 1.",
+        (
+            "Note: redder heatmap areas indicate stronger model attention for the current classification. "
+            "Each model visualization uses fold 1."
+        ),
         ha="center",
         fontsize=11.5,
         color="#4f5f57",
@@ -197,7 +212,8 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.output, bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    print(args.output)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    LOGGER.info("saved: %s", args.output)
 
 
 if __name__ == "__main__":

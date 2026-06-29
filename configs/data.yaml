@@ -1,0 +1,13 @@
+cleaning:
+  source: data/raw
+  report: cleaning_report
+  clean: data/cleaned
+  near_threshold: 5
+  suspect_fraction: 0.10
+
+augmentation:
+  source: data/cleaned
+  output: data/augmented
+  report: augmentation_report
+  seed: 20260617
+  target: null

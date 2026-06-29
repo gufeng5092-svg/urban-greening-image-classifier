@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 import numpy as np
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 
+from urban_greening_classifier.io import write_csv as shared_write_csv
+from urban_greening_classifier.logging_utils import configure_logging, get_logger
+
+LOGGER = get_logger(__name__)
+
 
 def read_predictions(path: Path) -> dict[tuple[int, str], dict]:
+    """Read exported fold predictions keyed by fold and image path."""
     rows: dict[tuple[int, str], dict] = {}
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
@@ -17,6 +26,7 @@ def read_predictions(path: Path) -> dict[tuple[int, str], dict]:
 
 
 def metric_rows(y_true: list[int], y_pred: list[int]) -> list[dict]:
+    """Compute standard classification metrics."""
     return [
         {"metric": "accuracy", "value": accuracy_score(y_true, y_pred)},
         {"metric": "macro_precision", "value": precision_score(y_true, y_pred, average="macro", zero_division=0)},
@@ -27,16 +37,12 @@ def metric_rows(y_true: list[int], y_pred: list[int]) -> list[dict]:
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        return
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
+    """Backward-compatible wrapper around the shared CSV writer."""
+    shared_write_csv(path, rows)
 
 
 def main() -> None:
+    configure_logging()
     parser = argparse.ArgumentParser(description="Average CV prediction probabilities from multiple models.")
     parser.add_argument("--predictions", type=Path, nargs="+", required=True)
     parser.add_argument("--weights", type=float, nargs="+", default=None)
@@ -87,7 +93,9 @@ def main() -> None:
     write_csv(args.output / "ensemble_metrics.csv", metrics)
 
     cm = confusion_matrix(y_true, y_pred, labels=list(range(len(prob_cols))))
-    cm_rows = [{"true_id": idx, **{f"pred_{j}": int(value) for j, value in enumerate(row)}} for idx, row in enumerate(cm)]
+    cm_rows = [
+        {"true_id": idx, **{f"pred_{j}": int(value) for j, value in enumerate(row)}} for idx, row in enumerate(cm)
+    ]
     write_csv(args.output / "ensemble_confusion_matrix.csv", cm_rows)
 
     lines = [
@@ -102,7 +110,7 @@ def main() -> None:
     for row in metrics:
         lines.append(f"| {row['metric']} | {row['value']:.6f} |")
     (args.output / "ensemble_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(args.output / "ensemble_report.md")
+    LOGGER.info("saved: %s", args.output / "ensemble_report.md")
 
 
 if __name__ == "__main__":

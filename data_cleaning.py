@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import math
 import shutil
+import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+from urban_greening_classifier.config import load_yaml_config
+from urban_greening_classifier.constants import IMAGE_EXTENSIONS
+from urban_greening_classifier.io import write_csv as shared_write_csv
+from urban_greening_classifier.logging_utils import configure_logging, get_logger
 
 try:
     from scipy.fftpack import dct
@@ -19,10 +26,7 @@ except Exception:  # pragma: no cover - only used when scipy is unavailable
     dct = None
 
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-SOURCE_DIR = Path("data/raw")
-REPORT_DIR = Path("cleaning_report")
-CLEAN_DIR = Path("cleaned_dataset")
+LOGGER = get_logger(__name__)
 
 
 @dataclass
@@ -45,11 +49,13 @@ class ImageMetric:
 
 
 def parse_label(path: Path) -> str:
+    """Infer the class label from the filename prefix before the final underscore."""
     stem = path.stem
     return stem.rsplit("_", 1)[0] if "_" in stem else stem
 
 
 def file_md5(path: Path) -> str:
+    """Calculate an MD5 checksum for duplicate detection."""
     digest = hashlib.md5()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -58,6 +64,7 @@ def file_md5(path: Path) -> str:
 
 
 def laplacian_variance(gray: np.ndarray) -> float:
+    """Compute a lightweight Laplacian variance blur heuristic."""
     arr = gray.astype(np.float32)
     lap = -4.0 * arr
     lap[:-1, :] += arr[1:, :]
@@ -68,6 +75,7 @@ def laplacian_variance(gray: np.ndarray) -> float:
 
 
 def perceptual_hash(image: Image.Image) -> str:
+    """Calculate a simple perceptual hash for near-duplicate review."""
     gray = ImageOps.grayscale(image).resize((32, 32), Image.Resampling.LANCZOS)
     arr = np.asarray(gray, dtype=np.float32)
     if dct is not None:
@@ -86,10 +94,12 @@ def perceptual_hash(image: Image.Image) -> str:
 
 
 def hamming_hex(a: str, b: str) -> int:
+    """Return the Hamming distance between two hexadecimal hashes."""
     return (int(a, 16) ^ int(b, 16)).bit_count()
 
 
 def color_ratios(rgb_image: Image.Image) -> tuple[float, float]:
+    """Estimate vegetation and soil-like color ratios for manual review."""
     rgb = np.asarray(rgb_image.resize((256, 256), Image.Resampling.BILINEAR), dtype=np.float32)
     hsv = np.asarray(rgb_image.convert("HSV").resize((256, 256), Image.Resampling.BILINEAR))
 
@@ -102,20 +112,13 @@ def color_ratios(rgb_image: Image.Image) -> tuple[float, float]:
     r = rgb[:, :, 0]
     g = rgb[:, :, 1]
     b = rgb[:, :, 2]
-    soil_like = (
-        (r > 65)
-        & (g > 45)
-        & (b > 25)
-        & (r >= g * 0.9)
-        & (g >= b * 0.85)
-        & (r > b * 1.15)
-        & (v >= 0.12)
-    )
+    soil_like = (r > 65) & (g > 45) & (b > 25) & (r >= g * 0.9) & (g >= b * 0.85) & (r > b * 1.15) & (v >= 0.12)
     total = float(green.size)
     return float(green.sum() / total), float(soil_like.sum() / total)
 
 
 def collect_metrics(files: Iterable[Path]) -> list[ImageMetric]:
+    """Collect readability, duplicate and image-quality metrics."""
     metrics: list[ImageMetric] = []
     for path in sorted(files, key=lambda p: p.name):
         label = parse_label(path)
@@ -168,18 +171,12 @@ def collect_metrics(files: Iterable[Path]) -> list[ImageMetric]:
 
 
 def write_csv(path: Path, rows: list[dict], fieldnames: list[str] | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if fieldnames is None and rows:
-        fieldnames = list(rows[0].keys())
-    if fieldnames is None:
-        fieldnames = []
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    """Backward-compatible wrapper around the shared CSV writer."""
+    shared_write_csv(path, rows, fieldnames)
 
 
 def exact_duplicate_rows(metrics: list[ImageMetric]) -> tuple[list[dict], set[str]]:
+    """Build exact duplicate records and return filenames to remove from the cleaned set."""
     grouped: dict[str, list[ImageMetric]] = defaultdict(list)
     for item in metrics:
         if item.readable:
@@ -212,6 +209,7 @@ def exact_duplicate_rows(metrics: list[ImageMetric]) -> tuple[list[dict], set[st
 
 
 def near_duplicate_rows(metrics: list[ImageMetric], threshold: int) -> list[dict]:
+    """Build candidate near-duplicate pairs using perceptual-hash distance."""
     readable = [m for m in metrics if m.readable and m.phash]
     rows: list[dict] = []
     for i, left in enumerate(readable):
@@ -232,12 +230,14 @@ def near_duplicate_rows(metrics: list[ImageMetric], threshold: int) -> list[dict
 
 
 def percentile_suspects(metrics: list[ImageMetric], key: str, fraction: float, low: bool) -> list[ImageMetric]:
+    """Select suspicious images from the low or high end of a numeric metric."""
     readable = [m for m in metrics if m.readable]
     count = max(1, math.ceil(len(readable) * fraction))
     return sorted(readable, key=lambda m: getattr(m, key), reverse=not low)[:count]
 
 
 def copy_clean_dataset(source_dir: Path, clean_dir: Path, metrics: list[ImageMetric], remove_names: set[str]) -> None:
+    """Copy readable, non-duplicate images into class directories as RGB PNG files."""
     clean_dir.mkdir(parents=True, exist_ok=True)
     for item in metrics:
         if not item.readable or item.file_name in remove_names:
@@ -251,6 +251,7 @@ def copy_clean_dataset(source_dir: Path, clean_dir: Path, metrics: list[ImageMet
 
 
 def load_font(size: int) -> ImageFont.ImageFont:
+    """Load a CJK-capable font when available and fall back to the PIL default."""
     candidates = [
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
@@ -266,6 +267,7 @@ def load_font(size: int) -> ImageFont.ImageFont:
 
 
 def compact_caption(name: str) -> str:
+    """Create a short caption for review contact sheets."""
     stem = Path(name).stem
     label = stem.rsplit("_", 1)[0] if "_" in stem else stem
     number = stem.rsplit("_", 1)[-1] if "_" in stem else stem
@@ -288,6 +290,7 @@ def create_contact_sheet(
     columns: int = 5,
     thumb_size: tuple[int, int] = (180, 140),
 ) -> None:
+    """Create a thumbnail contact sheet for manual review."""
     if not file_names:
         return
     rows = math.ceil(len(file_names) / columns)
@@ -313,7 +316,9 @@ def create_contact_sheet(
         px = x + (thumb_size[0] - thumb.width) // 2
         py = y + (thumb_size[1] - thumb.height) // 2
         sheet.paste(thumb, (px, py))
-        draw.text((x + 4, y + thumb_size[1] + 6), f"{idx + 1}. {compact_caption(name)}", fill=(20, 20, 20), font=caption_font)
+        draw.text(
+            (x + 4, y + thumb_size[1] + 6), f"{idx + 1}. {compact_caption(name)}", fill=(20, 20, 20), font=caption_font
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(output_path, quality=92)
@@ -330,6 +335,7 @@ def write_report(
     bright_rows: list[dict],
     low_green_rows: list[dict],
 ) -> None:
+    """Write the markdown data-cleaning summary report."""
     readable = [m for m in metrics if m.readable]
     class_before = Counter(m.label for m in readable)
     class_after = Counter(m.label for m in readable if m.file_name not in remove_names)
@@ -363,15 +369,27 @@ def write_report(
             "## 3. Cleaning Method",
             "",
             "- PIL is used to verify image readability, and cleaned images are saved as RGB PNG files.",
-            "- MD5 is used to detect exact duplicates. The first file in each sorted duplicate group is kept; the rest are removed from the cleaned set.",
-            "- Perceptual hash is used to detect near duplicates with Hamming distance <= 5. These records are only used for manual review.",
+            (
+                "- MD5 is used to detect exact duplicates. The first file in each sorted duplicate group is kept; "
+                "the rest are removed from the cleaned set."
+            ),
+            (
+                "- Perceptual hash is used to detect near duplicates with Hamming distance <= 5. These records are "
+                "only used for manual review."
+            ),
             "- Grayscale Laplacian variance is used as a blur heuristic. Lower values are more likely to be blurred.",
             "- Grayscale mean brightness is used to list underexposed and overexposed candidates.",
-            "- HSV vegetation ratio and soil-like color ratio are used as weak relevance checks for manual review only.",
+            (
+                "- HSV vegetation ratio and soil-like color ratio are used as weak relevance checks for manual "
+                "review only."
+            ),
             "",
             "## 4. Automatic Processing Results",
             "",
-            f"- Exact duplicate groups: {len({row['group_id'] for row in duplicate_rows}) if duplicate_rows else 0}",
+            (
+                "- Exact duplicate groups: "
+                f"{len({row['group_id'] for row in duplicate_rows}) if duplicate_rows else 0}"
+            ),
             f"- Images involved in exact duplicate groups: {len(duplicate_rows)}",
             f"- Duplicate copies excluded from the cleaned dataset: {len(remove_names)}",
             "- The raw data directory is not modified.",
@@ -398,12 +416,14 @@ def write_report(
 
 
 def main() -> None:
+    configure_logging()
+    defaults = load_yaml_config("configs/data.yaml")["cleaning"]
     parser = argparse.ArgumentParser(description="Clean urban greening classification image dataset.")
-    parser.add_argument("--source", type=Path, default=SOURCE_DIR)
-    parser.add_argument("--report", type=Path, default=REPORT_DIR)
-    parser.add_argument("--clean", type=Path, default=CLEAN_DIR)
-    parser.add_argument("--near-threshold", type=int, default=5)
-    parser.add_argument("--suspect-fraction", type=float, default=0.10)
+    parser.add_argument("--source", type=Path, default=Path(defaults["source"]))
+    parser.add_argument("--report", type=Path, default=Path(defaults["report"]))
+    parser.add_argument("--clean", type=Path, default=Path(defaults["clean"]))
+    parser.add_argument("--near-threshold", type=int, default=defaults["near_threshold"])
+    parser.add_argument("--suspect-fraction", type=float, default=defaults["suspect_fraction"])
     parser.add_argument("--no-copy", action="store_true", help="Only generate reports; do not create cleaned dataset.")
     args = parser.parse_args()
 
@@ -439,16 +459,32 @@ def main() -> None:
     before = Counter(m.label for m in metrics if m.readable)
     after = Counter(m.label for m in metrics if m.readable and m.file_name not in remove_names)
     dist_rows = [
-        {"label": label, "before_cleaning": before[label], "after_cleaning": after[label]}
-        for label in sorted(before)
+        {"label": label, "before_cleaning": before[label], "after_cleaning": after[label]} for label in sorted(before)
     ]
     write_csv(args.report / "class_distribution.csv", dist_rows)
 
     sheet_dir = args.report / "review_sheets"
-    create_contact_sheet(args.source, sheet_dir / "suspicious_blur.jpg", [m.file_name for m in blur_items[:25]], "Blur Candidate Review")
-    create_contact_sheet(args.source, sheet_dir / "suspicious_dark.jpg", [m.file_name for m in dark_items[:25]], "Dark Image Candidate Review")
-    create_contact_sheet(args.source, sheet_dir / "suspicious_bright.jpg", [m.file_name for m in bright_items[:25]], "Bright Image Candidate Review")
-    create_contact_sheet(args.source, sheet_dir / "suspicious_low_green.jpg", [m.file_name for m in low_green_items[:25]], "Low Vegetation Ratio Review")
+    create_contact_sheet(
+        args.source, sheet_dir / "suspicious_blur.jpg", [m.file_name for m in blur_items[:25]], "Blur Candidate Review"
+    )
+    create_contact_sheet(
+        args.source,
+        sheet_dir / "suspicious_dark.jpg",
+        [m.file_name for m in dark_items[:25]],
+        "Dark Image Candidate Review",
+    )
+    create_contact_sheet(
+        args.source,
+        sheet_dir / "suspicious_bright.jpg",
+        [m.file_name for m in bright_items[:25]],
+        "Bright Image Candidate Review",
+    )
+    create_contact_sheet(
+        args.source,
+        sheet_dir / "suspicious_low_green.jpg",
+        [m.file_name for m in low_green_items[:25]],
+        "Low Vegetation Ratio Review",
+    )
 
     if duplicate_rows:
         duplicate_names = [row["file_name"] for row in duplicate_rows[:25]]
@@ -471,13 +507,13 @@ def main() -> None:
         low_green_rows,
     )
 
-    print(f"Raw images: {len(metrics)}")
-    print(f"Readable images: {sum(1 for m in metrics if m.readable)}")
-    print(f"Exact duplicate copies removed: {len(remove_names)}")
-    print(f"Cleaned images: {sum(1 for m in metrics if m.readable and m.file_name not in remove_names)}")
-    print(f"Report directory: {args.report}")
+    LOGGER.info("Raw images: %s", len(metrics))
+    LOGGER.info("Readable images: %s", sum(1 for m in metrics if m.readable))
+    LOGGER.info("Exact duplicate copies removed: %s", len(remove_names))
+    LOGGER.info("Cleaned images: %s", sum(1 for m in metrics if m.readable and m.file_name not in remove_names))
+    LOGGER.info("Report directory: %s", args.report)
     if not args.no_copy:
-        print(f"Cleaned data directory: {args.clean}")
+        LOGGER.info("Cleaned data directory: %s", args.clean)
 
 
 if __name__ == "__main__":

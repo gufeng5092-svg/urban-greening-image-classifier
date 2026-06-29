@@ -1,90 +1,116 @@
-# Trained Urban Greening Maintenance Image Classifier
+# Urban Greening Image Classifier
 
-This repository contains a trained image classification system for urban greening maintenance inspection. It can classify uploaded street-scene images into three maintenance issue categories:
+An engineering-ready image classification repository for urban greening maintenance inspection. The project keeps the original trained ensemble and experiment behavior intact, while providing maintainable configuration, reusable Python modules, tests, Docker deployment and CI.
+
+The classifier predicts three maintenance issue categories:
 
 - `存在明显暴露垃圾`: obvious exposed trash
-- `存在单处面积大于1m²小于5m²的泥土裸露`: a single bare-soil area larger than 1 square meter and smaller than 5 square meters
-- `存在单处面积大于5m²的泥土裸露`: a single bare-soil area larger than 5 square meters
+- `存在单处面积大于1m²小于5m²的泥土裸露`: one bare-soil area larger than 1 square meter and smaller than 5 square meters
+- `存在单处面积大于5m²的泥土裸露`: one bare-soil area larger than 5 square meters
 
-The trained model weights are included under `final_app/checkpoints/`. The web demo loads these checkpoints and runs a weighted three-model ensemble for inference.
+## Features
 
-## Repository Layout
+- K-fold training pipeline for `small_cnn`, `resnet18`, `mobilenet_v3_small` and `efficientnet_b0`.
+- Weighted trained ensemble for production inference.
+- YAML-based configuration for data processing, training and inference.
+- Reusable `src/urban_greening_classifier` package for paths, logging, datasets, transforms, models and inference.
+- Flask browser demo kept under `final_app/`.
+- FastAPI service with `POST /predict` for deployment.
+- Dockerfile, docker-compose and GitHub Actions CI.
+- pytest coverage for config loading, data loading, inference and utility functions.
+- black, isort and flake8 configuration for consistent code style.
+
+## Project Structure
 
 ```text
 .
-├── data_cleaning.py              # Raw image checks, duplicate detection, cleaned dataset export
-├── data_augmentation.py          # Offline augmentation for minority classes
-├── train_cross_validation.py     # K-fold training for CNN backbones
-├── export_cv_predictions.py      # Export validation probabilities from saved folds
-├── ensemble_predictions.py       # Weighted probability ensembling
-├── final_app/                    # Flask inference demo and trained checkpoints
-├── requirements.txt              # Training and analysis dependencies
+├── configs/                         # YAML configuration files
+│   ├── data.yaml
+│   ├── inference.yaml
+│   └── train.yaml
+├── data/                            # Dataset instructions; local data is ignored by Git
+├── docs/
+│   └── ARCHITECTURE.md              # Architecture and data-flow notes
+├── final_app/                       # Existing Flask demo and trained checkpoints
+│   ├── app.py
+│   ├── inference.py
+│   ├── checkpoints/
+│   └── examples/
+├── src/urban_greening_classifier/   # Reusable package
+├── tests/                           # pytest tests
+├── data_cleaning.py                 # Raw image checks and cleaned dataset export
+├── data_augmentation.py             # Offline class-balancing augmentation
+├── train_cross_validation.py        # K-fold training
+├── export_cv_predictions.py         # Export fold validation probabilities
+├── ensemble_predictions.py          # Offline weighted ensembling
+├── Dockerfile
+├── docker-compose.yml
 └── README.md
 ```
 
-## Trained System
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture overview.
+Model artifact handling is documented in [docs/MODEL_ARTIFACTS.md](docs/MODEL_ARTIFACTS.md).
+Deployment device policy is documented in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-The included inference system uses a weighted ensemble of three CNN backbones:
+## Installation
 
-- EfficientNet-B0: 0.25
-- MobileNetV3-Small: 0.35
-- ResNet18: 0.40
-
-Each backbone uses five cross-validation checkpoints. During inference, the five folds are averaged for each backbone first, and then the three backbone probability vectors are combined with the weights above.
-
-Run the trained web demo:
+Python 3.10 or newer is recommended.
 
 ```bash
-python3 -m pip install -r final_app/requirements_app.txt
-cd final_app
-python3 app.py
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
-Then open:
+On Windows:
 
-```text
-http://127.0.0.1:7860
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
-## Data Policy
+## Data Preparation
 
-The original competition dataset is not included in this repository. Put local training images under `data/raw/` when reproducing or extending the pipeline. Generated datasets and training outputs are ignored by Git because they are large and may contain competition data.
-
-Expected raw-data format:
+The original dataset is not included. Put local raw images under `data/raw/` with the label prefix before the final underscore:
 
 ```text
 data/raw/
-├── 存在单处面积大于1m²小于5m²的泥土裸露_001.png
-├── 存在单处面积大于5m²的泥土裸露_002.png
-└── 存在明显暴露垃圾_003.png
+├── 存在明显暴露垃圾_001.png
+├── 存在单处面积大于1m²小于5m²的泥土裸露_002.png
+└── 存在单处面积大于5m²的泥土裸露_003.png
 ```
 
-The scripts infer labels from the filename prefix before the final underscore.
-
-## Setup
+Clean the dataset:
 
 ```bash
-python3 -m pip install -r requirements.txt
+python data_cleaning.py --source data/raw --clean data/cleaned --report cleaning_report
 ```
 
-## Training Pipeline
-
-Clean the raw dataset:
+Optional offline augmentation:
 
 ```bash
-python3 data_cleaning.py --source data/raw --clean data/cleaned --report cleaning_report
+python data_augmentation.py --source data/cleaned --output data/augmented --report augmentation_report
 ```
 
-Generate offline augmented data if needed:
+Defaults are stored in [configs/data.yaml](configs/data.yaml).
+
+## Model Training
+
+Training defaults live in [configs/train.yaml](configs/train.yaml). Command-line arguments override the YAML defaults.
 
 ```bash
-python3 data_augmentation.py --source data/cleaned --output data/augmented --report augmentation_report
+python train_cross_validation.py --config configs/train.yaml
 ```
 
-Train a 5-fold EfficientNet-B0 baseline:
+Example EfficientNet-B0 run matching the original style:
 
 ```bash
-python3 train_cross_validation.py \
+python train_cross_validation.py \
   --data data/cleaned \
   --model efficientnet_b0 \
   --pretrained \
@@ -92,71 +118,122 @@ python3 train_cross_validation.py \
   --no-augment
 ```
 
-Export fold predictions:
+Outputs are written to `cv_results/`, including fold checkpoints, metrics CSV files, confusion matrices and a markdown report.
+
+## Model Inference
+
+### Flask Demo
 
 ```bash
-python3 export_cv_predictions.py \
-  --result-dir cv_results/efficientnet_b0_k5_seed20260617_noaug_cw_nosampler_pretrained \
-  --model efficientnet_b0
+python final_app/app.py
 ```
 
-Combine multiple model prediction files:
+Open:
+
+```text
+http://127.0.0.1:7860
+```
+
+### FastAPI
 
 ```bash
-python3 ensemble_predictions.py \
-  --predictions path/to/model_a/overall_predictions.csv path/to/model_b/overall_predictions.csv \
-  --weights 0.6 0.4 \
-  --output cv_results/ensemble
+uvicorn urban_greening_classifier.api:app --host 0.0.0.0 --port 7860
 ```
 
-## Adding Images and Training Again
-
-To add more training images, place the new files in `data/raw/` with the same filename convention:
-
-```text
-<class_name>_<unique_id>.png
-```
-
-Examples:
-
-```text
-data/raw/存在明显暴露垃圾_1001.png
-data/raw/存在单处面积大于1m²小于5m²的泥土裸露_1002.png
-data/raw/存在单处面积大于5m²的泥土裸露_1003.png
-```
-
-After adding images, rerun the pipeline:
+Prediction request:
 
 ```bash
-python3 data_cleaning.py --source data/raw --clean data/cleaned --report cleaning_report
-
-python3 train_cross_validation.py \
-  --data data/cleaned \
-  --model efficientnet_b0 \
-  --pretrained \
-  --class-weights \
-  --no-augment \
-  --run-name retrained
+curl -X POST "http://127.0.0.1:7860/predict" \
+  -F "image=@final_app/examples/存在明显暴露垃圾_586.png"
 ```
 
-Repeat training for any other backbone you want to include in the ensemble, such as `mobilenet_v3_small` or `resnet18`. After training, copy the selected fold checkpoints into the corresponding `final_app/checkpoints/<model_name>/` directory using the names expected by the demo:
+Response:
+
+```json
+{
+  "class": "存在明显暴露垃圾",
+  "confidence": 0.98
+}
+```
+
+## Example Images
+
+Sample images are provided in `final_app/examples/` for local smoke testing:
 
 ```text
-fold_1.pth
-fold_2.pth
-fold_3.pth
-fold_4.pth
-fold_5.pth
+final_app/examples/存在明显暴露垃圾_586.png
+final_app/examples/存在明显暴露垃圾_753.png
+final_app/examples/存在明显暴露垃圾_790.png
 ```
 
-Keep `final_app/class_names.json` in the same class order used during training. If class order changes, predictions will be mapped to the wrong labels.
+## Performance Metrics
 
-## Web Demo
+The included inference system uses a weighted ensemble of three backbones:
 
-See [final_app/README.md](final_app/README.md) for the inference app details.
+| Model | Ensemble Weight | Checkpoints |
+|---|---:|---:|
+| EfficientNet-B0 | 0.25 | 5 folds |
+| MobileNetV3-Small | 0.35 | 5 folds |
+| ResNet18 | 0.40 | 5 folds |
 
-## Notes for GitHub Publishing
+Reproducible training runs write `fold_metrics.csv`, `summary_metrics.csv`, confusion matrices and `cross_validation_report.md` under `cv_results/`. Because the source competition data is not committed, aggregate metrics should be generated from the local dataset used for training.
 
-- Do not commit raw data, cleaned data, augmented data, cache folders, or large CV output directories.
-- The trained checkpoints under `final_app/checkpoints/` are kept so the repository can run as a ready-to-use classifier.
-- The Chinese class names are kept because they are the model labels and define checkpoint output order.
+## Deployment
+
+Build and run with Docker:
+
+```bash
+docker build -t urban-greening-classifier .
+docker run --rm -p 7860:7860 urban-greening-classifier
+```
+
+Or use docker-compose:
+
+```bash
+docker compose up --build
+```
+
+The container starts the FastAPI service and loads checkpoints from `final_app/checkpoints/`. Docker installs CPU-only PyTorch by default to avoid shipping unnecessary CUDA dependencies in the API image. CUDA is an optional Linux GPU deployment path, not the default.
+
+## Development
+
+Run quality checks:
+
+```bash
+black .
+isort .
+flake8 .
+pytest
+```
+
+CI runs dependency installation, flake8 and pytest on every push and pull request.
+
+## FAQ
+
+**Does this upgrade change the algorithm or trained weights?**  
+No. Model architectures, inference weighting and checkpoint files are preserved.
+
+**Where should paths and parameters be changed?**  
+Use YAML files under `configs/`. CLI arguments can override training defaults.
+
+**Why is the dataset not included?**  
+Raw, cleaned and augmented datasets can be large and may be governed by competition or privacy constraints, so they are ignored by Git.
+
+**Can I change class names?**  
+Only if you retrain checkpoints and update `final_app/class_names.json` in the exact output order used during training.
+
+**Which API should I deploy?**  
+Use FastAPI for service deployment. The Flask app is kept as a browser demo.
+
+**Will this use Apple MPS?**  
+Yes. With `device: auto`, PyTorch uses CUDA first when available, then Apple MPS, then CPU. On your Apple Silicon machine, MPS is the expected accelerator.
+
+**Why is Docker CPU-only by default?**  
+The API image should be portable. CUDA dependencies are large and only useful on Linux NVIDIA deployments, so CUDA is documented as an optional deployment variant.
+
+**Should checkpoints stay in Git?**  
+Small demo checkpoints can stay in Git for reproducibility. For larger production models, use GitHub Releases, Git LFS or an internal artifact registry.
+
+## License
+
+This project is released under the [MIT License](LICENSE).

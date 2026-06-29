@@ -1,0 +1,14 @@
+app:
+  host: 0.0.0.0
+  port: 7860
+  max_upload_mb: 64
+
+inference:
+  checkpoint_dir: final_app/checkpoints
+  class_names_path: final_app/class_names.json
+  image_size: 224
+  device: auto
+  model_weights:
+    efficientnet_b0: 0.25
+    mobilenet_v3_small: 0.35
+    resnet18: 0.40

@@ -1,0 +1,19 @@
+"""Logging helpers used by command-line tools and services."""
+
+from __future__ import annotations
+
+import logging
+
+
+def configure_logging(level: str = "INFO") -> None:
+    """Configure process-wide logging with a compact human-readable format."""
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Return a named logger."""
+    return logging.getLogger(name)

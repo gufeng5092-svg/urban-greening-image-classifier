@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import json
 import os
-import random
+import sys
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(".matplotlib_cache").resolve()))
 os.environ.setdefault("XDG_CACHE_HOME", str(Path(".cache").resolve()))
@@ -20,14 +20,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 from sklearn.model_selection import StratifiedKFold
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
-from torchvision import models, transforms
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
+from urban_greening_classifier.config import flatten_config, load_yaml_config
+from urban_greening_classifier.data import ImagePathDataset, load_samples
+from urban_greening_classifier.device import choose_device
+from urban_greening_classifier.io import write_csv as shared_write_csv
+from urban_greening_classifier.io import write_json
+from urban_greening_classifier.logging_utils import configure_logging, get_logger
+from urban_greening_classifier.models import SUPPORTED_MODELS, create_model
+from urban_greening_classifier.reproducibility import set_seed
+from urban_greening_classifier.transforms import build_train_transforms
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+LOGGER = get_logger(__name__)
 
 
 def configure_matplotlib_font() -> None:
@@ -71,137 +78,15 @@ class FoldMetric:
     device: str
 
 
-class ImagePathDataset(Dataset):
-    def __init__(self, samples: list[tuple[Path, int]], transform: transforms.Compose | None = None) -> None:
-        self.samples = samples
-        self.transform = transform
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
-        path, label = self.samples[index]
-        with Image.open(path) as image:
-            image = image.convert("RGB")
-        if self.transform is not None:
-            image = self.transform(image)
-        return image, label
-
-
-class SmallCNN(nn.Module):
-    def __init__(self, num_classes: int) -> None:
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Conv2d(128, 192, 3, padding=1),
-            nn.BatchNorm2d(192),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),
-        )
-        self.classifier = nn.Sequential(nn.Dropout(0.25), nn.Linear(192, num_classes))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = torch.flatten(x, 1)
-        return self.classifier(x)
-
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
-def choose_device(requested: str) -> torch.device:
-    if requested != "auto":
-        return torch.device(requested)
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
-def load_samples(data_dir: Path) -> tuple[list[tuple[Path, int]], list[str]]:
-    class_dirs = sorted([p for p in data_dir.iterdir() if p.is_dir()], key=lambda p: p.name)
-    class_names = [p.name for p in class_dirs]
-    samples: list[tuple[Path, int]] = []
-    for label_id, class_dir in enumerate(class_dirs):
-        for path in sorted(class_dir.iterdir(), key=lambda p: p.name):
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
-                samples.append((path, label_id))
-    if not samples:
-        raise RuntimeError(f"No images found under {data_dir}")
-    return samples, class_names
-
-
-def build_transforms(image_size: int) -> tuple[transforms.Compose, transforms.Compose]:
-    train_transform = transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomApply([transforms.RandomRotation(degrees=12)], p=0.5),
-            transforms.RandomResizedCrop(image_size, scale=(0.86, 1.0), ratio=(0.85, 1.15)),
-            transforms.ColorJitter(brightness=0.18, contrast=0.18, saturation=0.18),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.8))], p=0.15),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-            transforms.RandomErasing(p=0.15, scale=(0.02, 0.08), ratio=(0.5, 2.0)),
-        ]
-    )
-    val_transform = transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-        ]
-    )
-    return train_transform, val_transform
-
-
-def create_model(model_name: str, num_classes: int, pretrained: bool) -> nn.Module:
-    if model_name == "small_cnn":
-        return SmallCNN(num_classes)
-
-    if model_name == "resnet18":
-        weights = models.ResNet18_Weights.DEFAULT if pretrained else None
-        model = models.resnet18(weights=weights)
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
-        return model
-
-    if model_name == "mobilenet_v3_small":
-        weights = models.MobileNet_V3_Small_Weights.DEFAULT if pretrained else None
-        model = models.mobilenet_v3_small(weights=weights)
-        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
-        return model
-
-    if model_name == "efficientnet_b0":
-        weights = models.EfficientNet_B0_Weights.DEFAULT if pretrained else None
-        model = models.efficientnet_b0(weights=weights)
-        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
-        return model
-
-    raise ValueError(f"Unsupported model: {model_name}")
-
-
 def make_sampler(train_labels: list[int]) -> WeightedRandomSampler:
+    """Create an inverse-frequency sampler for imbalanced training folds."""
     counts = Counter(train_labels)
     weights = [1.0 / counts[label] for label in train_labels]
     return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
 
 
 def class_weight_tensor(labels: list[int], num_classes: int, device: torch.device) -> torch.Tensor:
+    """Create inverse-frequency class weights for cross-entropy loss."""
     counts = Counter(labels)
     total = sum(counts.values())
     weights = [total / (num_classes * counts[i]) for i in range(num_classes)]
@@ -215,6 +100,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> tuple[float, float]:
+    """Train one epoch and return average loss plus accuracy."""
     model.train()
     total_loss = 0.0
     all_preds: list[int] = []
@@ -235,6 +121,7 @@ def train_one_epoch(
 
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device: torch.device) -> dict:
+    """Evaluate a model and return loss, metrics, labels and predictions."""
     model.eval()
     total_loss = 0.0
     all_preds: list[int] = []
@@ -297,26 +184,33 @@ def save_curve(history: list[dict], output_path: Path) -> None:
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        return
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
+    """Backward-compatible wrapper around the shared CSV writer."""
+    shared_write_csv(path, rows)
 
 
 def summarize_metrics(metrics: list[FoldMetric]) -> list[dict]:
-    fields = ["accuracy", "macro_precision", "macro_recall", "macro_f1", "weighted_f1", "train_seconds", "inference_ms_per_image"]
+    fields = [
+        "accuracy",
+        "macro_precision",
+        "macro_recall",
+        "macro_f1",
+        "weighted_f1",
+        "train_seconds",
+        "inference_ms_per_image",
+    ]
     rows = []
     for field in fields:
         values = np.array([getattr(m, field) for m in metrics], dtype=np.float64)
-        rows.append({"metric": field, "mean": round(float(values.mean()), 6), "std": round(float(values.std(ddof=0)), 6)})
+        rows.append(
+            {"metric": field, "mean": round(float(values.mean()), 6), "std": round(float(values.std(ddof=0)), 6)}
+        )
     return rows
 
 
 def run_cross_validation(args: argparse.Namespace) -> None:
-    set_seed(args.seed)
+    """Run K-fold training and persist metrics, plots and checkpoints."""
+    configure_logging(args.log_level)
+    set_seed(args.seed, deterministic=args.deterministic)
     device = choose_device(args.device)
     samples, class_names = load_samples(args.data)
     labels = np.array([label for _, label in samples])
@@ -335,9 +229,9 @@ def run_cross_validation(args: argparse.Namespace) -> None:
         tags.append(args.run_name)
     output_dir = args.output / "_".join(tags)
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "class_names.json").write_text(json.dumps(class_names, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(output_dir / "class_names.json", class_names)
 
-    train_transform, val_transform = build_transforms(args.image_size)
+    train_transform, val_transform = build_train_transforms(args.image_size)
     splitter = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=args.seed)
 
     fold_metrics: list[FoldMetric] = []
@@ -353,9 +247,13 @@ def run_cross_validation(args: argparse.Namespace) -> None:
         train_labels = [label for _, label in train_samples]
 
         for idx in train_idx:
-            split_rows.append({"fold": fold, "split": "train", "path": str(samples[idx][0]), "label": class_names[samples[idx][1]]})
+            split_rows.append(
+                {"fold": fold, "split": "train", "path": str(samples[idx][0]), "label": class_names[samples[idx][1]]}
+            )
         for idx in val_idx:
-            split_rows.append({"fold": fold, "split": "val", "path": str(samples[idx][0]), "label": class_names[samples[idx][1]]})
+            split_rows.append(
+                {"fold": fold, "split": "val", "path": str(samples[idx][0]), "label": class_names[samples[idx][1]]}
+            )
 
         train_dataset = ImagePathDataset(train_samples, train_transform if args.augment else val_transform)
         val_dataset = ImagePathDataset(val_samples, val_transform)
@@ -395,10 +293,9 @@ def run_cross_validation(args: argparse.Namespace) -> None:
                 "val_macro_f1": round(float(val_metrics["macro_f1"]), 6),
             }
             history.append(row)
-            print(
+            LOGGER.info(
                 f"fold {fold}/{args.folds} epoch {epoch}/{args.epochs} "
-                f"train_loss={train_loss:.4f} val_macro_f1={val_metrics['macro_f1']:.4f}",
-                flush=True,
+                f"train_loss={train_loss:.4f} val_macro_f1={val_metrics['macro_f1']:.4f}"
             )
             if val_metrics["macro_f1"] > best_macro_f1:
                 best_macro_f1 = float(val_metrics["macro_f1"])
@@ -409,7 +306,9 @@ def run_cross_validation(args: argparse.Namespace) -> None:
         if best_state is not None:
             model.load_state_dict(best_state)
         final_metrics = evaluate(model, val_loader, criterion, device)
-        fold_cm = confusion_matrix(final_metrics["labels"], final_metrics["preds"], labels=list(range(len(class_names))))
+        fold_cm = confusion_matrix(
+            final_metrics["labels"], final_metrics["preds"], labels=list(range(len(class_names)))
+        )
         save_confusion_matrix(fold_cm, class_names, fold_dir / "confusion_matrix.png")
         save_curve(history, fold_dir / "training_curve.png")
         write_csv(fold_dir / "history.csv", history)
@@ -468,29 +367,37 @@ def run_cross_validation(args: argparse.Namespace) -> None:
         lines.append(f"| {row['metric']} | {row['mean']} | {row['std']} |")
     (output_dir / "cross_validation_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    print(f"saved: {output_dir}")
+    LOGGER.info("saved: %s", output_dir)
 
 
 def parse_args() -> argparse.Namespace:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=Path, default=Path("configs/train.yaml"))
+    config_args, _ = config_parser.parse_known_args()
+    defaults = flatten_config(load_yaml_config(config_args.config))
     parser = argparse.ArgumentParser(description="5-fold cross validation for urban greening image classification.")
-    parser.add_argument("--data", type=Path, default=Path("data/cleaned"))
-    parser.add_argument("--output", type=Path, default=Path("cv_results"))
-    parser.add_argument("--model", choices=["small_cnn", "resnet18", "mobilenet_v3_small", "efficientnet_b0"], default="efficientnet_b0")
-    parser.add_argument("--folds", type=int, default=5)
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--image-size", type=int, default=224)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--seed", type=int, default=20260617)
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--device", default="auto")
+    parser.add_argument("--config", type=Path, default=config_args.config)
+    parser.add_argument("--data", type=Path, default=Path(defaults["data"]))
+    parser.add_argument("--output", type=Path, default=Path(defaults["output"]))
+    parser.add_argument("--model", choices=SUPPORTED_MODELS, default=defaults["model"])
+    parser.add_argument("--folds", type=int, default=defaults["folds"])
+    parser.add_argument("--epochs", type=int, default=defaults["epochs"])
+    parser.add_argument("--batch-size", type=int, default=defaults["batch_size"])
+    parser.add_argument("--image-size", type=int, default=defaults["image_size"])
+    parser.add_argument("--lr", type=float, default=defaults["lr"])
+    parser.add_argument("--weight-decay", type=float, default=defaults["weight_decay"])
+    parser.add_argument("--seed", type=int, default=defaults["seed"])
+    parser.add_argument("--num-workers", type=int, default=defaults["num_workers"])
+    parser.add_argument("--device", default=defaults["device"])
     parser.add_argument("--pretrained", action="store_true")
     parser.add_argument("--no-augment", dest="augment", action="store_false")
-    parser.set_defaults(augment=True)
+    parser.set_defaults(augment=defaults["augment"], pretrained=defaults["pretrained"])
     parser.add_argument("--class-weights", action="store_true")
     parser.add_argument("--weighted-sampler", action="store_true")
-    parser.add_argument("--run-name", default="")
+    parser.set_defaults(class_weights=defaults["class_weights"], weighted_sampler=defaults["weighted_sampler"])
+    parser.add_argument("--deterministic", action="store_true", default=defaults["deterministic"])
+    parser.add_argument("--run-name", default=defaults["run_name"])
+    parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
 
 

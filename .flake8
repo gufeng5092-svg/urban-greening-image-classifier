@@ -1,0 +1,21 @@
+[flake8]
+max-line-length = 120
+extend-ignore = E203,W503
+exclude =
+    .git,
+    .venv,
+    __pycache__,
+    .pytest_cache,
+    .mypy_cache,
+    cv_results,
+    cleaning_report,
+    augmentation_report
+per-file-ignores =
+    data_augmentation.py:E402
+    data_cleaning.py:E402
+    ensemble_predictions.py:E402
+    export_cv_predictions.py:E402
+    final_app/app.py:E402
+    final_app/generate_model_stage_comparison.py:E402
+    final_app/inference.py:E402
+    train_cross_validation.py:E402

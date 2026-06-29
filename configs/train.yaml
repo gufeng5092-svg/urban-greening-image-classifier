@@ -1,0 +1,23 @@
+data:
+  data: data/cleaned
+  output: cv_results
+
+model:
+  model: efficientnet_b0
+  pretrained: false
+
+training:
+  folds: 5
+  epochs: 20
+  batch_size: 16
+  image_size: 224
+  lr: 0.0003
+  weight_decay: 0.0001
+  seed: 20260617
+  num_workers: 0
+  device: auto
+  augment: true
+  class_weights: false
+  weighted_sampler: false
+  run_name: ""
+  deterministic: false
